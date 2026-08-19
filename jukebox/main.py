@@ -142,7 +142,10 @@ def main() -> None:
                     break
                 time.sleep(args.interval)
                 continue
-            gesture = recognizer.recognize_bgr(frame)
+            gesture, hand_visible = recognizer.recognize_bgr(frame)
+            if hand_visible and player.dancer is not None:
+                # Calm the dance so the camera steadies and the sign can be read.
+                player.dancer.calm(2.0)
             action = debouncer.feed(gesture, time.monotonic())
             if action:
                 act(player, mapping, action)

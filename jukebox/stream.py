@@ -28,7 +28,7 @@ logger = logging.getLogger("jukebox.stream")
 
 CHUNK_S = 0.10
 LEAD_S = 0.40
-OUTPUT_LATENCY_S = 0.25  # WebRTC + speaker pipeline guess; tune with --latency
+OUTPUT_LATENCY_S = 0.60  # WebRTC + jitter buffer + speaker; tune with --latency
 
 
 def load_samples(wav_path: Path | str) -> np.ndarray:

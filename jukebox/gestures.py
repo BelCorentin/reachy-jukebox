@@ -118,8 +118,13 @@ class Recognizer:
         )
         self._recognizer = vision.GestureRecognizer.create_from_options(options)
 
-    def recognize_bgr(self, frame_bgr) -> str | None:
-        """Return the top gesture name for a BGR numpy frame, or None."""
+    def recognize_bgr(self, frame_bgr) -> tuple[str | None, bool]:
+        """Return (gesture name or None, hand visible) for a BGR numpy frame.
+
+        Hand visibility is reported separately so the caller can calm the
+        dance as soon as ANY hand appears — classification usually needs a
+        steadier camera than detection does.
+        """
         import cv2
 
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -138,4 +143,4 @@ class Recognizer:
         # the classifier found nothing (it labels a down-point as None).
         if name is None and landmarks is not None and detect_pointing_down(landmarks):
             name = "Pointing_Down"
-        return name
+        return name, landmarks is not None

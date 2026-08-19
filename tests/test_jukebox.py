@@ -106,14 +106,15 @@ ok(not detect_pointing_down(None), "no landmarks -> False")
 print("analysis")
 
 
-def synth_wav(seconds=16.0, sr=STREAM_RATE, bpm=None, low_hz=None, high_hz=None, split=False):
+def synth_wav(seconds=16.0, sr=STREAM_RATE, bpm=None, low_hz=None, high_hz=None,
+              split=False, offset=0.0):
     """Click track and/or tones; split=True puts low in 1st half, high in 2nd."""
     n = int(seconds * sr)
     t = np.arange(n) / sr
     x = np.zeros(n, dtype=np.float32)
     if bpm:
         beat = 60.0 / bpm
-        for bt in np.arange(0, seconds, beat):
+        for bt in np.arange(offset, seconds, beat):
             i = int(bt * sr)
             dur = int(0.05 * sr)
             env = np.exp(-np.linspace(0, 8, dur))
@@ -147,7 +148,16 @@ ok(np.mean(a_band["high"][half:]) > np.mean(a_band["high"][:half]),
    "high envelope tracks the 2 kHz half")
 for k in ("energy", "low", "high"):
     ok(0.0 <= min(a_band[k]) and max(a_band[k]) <= 1.0, f"{k} normalised to [0,1]")
-ok(analyze(synth_wav(bpm=130))["version"] == 2, "sidecar version 2")
+ok(analyze(synth_wav(bpm=130))["version"] == 3, "sidecar version 3")
+
+a_off = analyze(synth_wav(bpm=120, offset=0.25))
+period = 60.0 / 120.0
+err = min(abs(a_off["beat_offset_s"] - 0.25), abs(a_off["beat_offset_s"] - 0.25 + period),
+          abs(a_off["beat_offset_s"] - 0.25 - period))
+ok(err < 0.06, f"beat offset recovered ({a_off['beat_offset_s']}s vs 0.25s)")
+a_zero = analyze(synth_wav(bpm=120, offset=0.0))
+err0 = min(abs(a_zero["beat_offset_s"]), abs(a_zero["beat_offset_s"] - period))
+ok(err0 < 0.06, f"zero offset stays ~zero ({a_zero['beat_offset_s']}s)")
 
 # ── dance pose math ─────────────────────────────────────────────────────────
 
@@ -226,6 +236,19 @@ ok(player.gain <= 1.5, "gain capped at 1.5")
 for _ in range(20):
     act(player, mapping, "Pointing_Down")
 ok(player.gain >= 0.0, "gain floored at 0")
+
+# calm: hand in frame damps the dance so the camera steadies
+dancer = player.dancer
+n0 = len(robot.targets)
+time.sleep(0.2)
+full_moves = robot.targets[n0:]
+dancer.calm(1.0)
+time.sleep(0.6)
+n1 = len(robot.targets)
+time.sleep(0.2)
+calm_moves = robot.targets[n1:]
+ok(dancer._damp < 0.3, "calm damps motion toward 15%")
+ok(len(calm_moves) > 0, "dancer keeps ticking while calm")
 
 act(player, mapping, "Closed_Fist")
 time.sleep(0.3)

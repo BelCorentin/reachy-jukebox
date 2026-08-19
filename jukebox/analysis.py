@@ -23,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 
-VERSION = 2
+VERSION = 3
 FRAME_HZ = 50.0
 ENV_HZ = 20.0
 BPM_MIN, BPM_MAX = 60.0, 190.0
@@ -57,11 +57,29 @@ def _estimate_bpm(onset: np.ndarray, rate_hz: float) -> float:
     lags = np.arange(lag_min, lag_max + 1)
     best = lags[int(np.argmax(ac[lag_min : lag_max + 1]))]
     bpm = 60.0 * rate_hz / best
-    while bpm < 90.0 and bpm * 2 <= BPM_MAX:
+    # Fold into a danceable 70-140 window: a 176 "BPM" waltz subdivision
+    # should read as a graceful 88, not a headbang.
+    while bpm < 70.0:
         bpm *= 2
-    while bpm > 180.0:
+    while bpm >= 140.0:
         bpm /= 2
     return float(bpm)
+
+
+def _beat_offset(onset: np.ndarray, rate_hz: float, bpm: float) -> float:
+    """Phase of the beat grid (seconds): where within a period the onsets live.
+
+    Sums onset energy over a grid of candidate phases; the best phase aligns
+    the dance's beat 0 with the song's actual beats instead of t=0.
+    """
+    period = 60.0 / bpm
+    lag = period * rate_hz  # onset frames per beat
+    n = len(onset)
+    if n < 2 * lag:
+        return 0.0
+    phases = np.arange(0, int(round(lag)))
+    scores = [onset[(np.arange(int(n // lag)) * lag + p).astype(int) % n].sum() for p in phases]
+    return float(phases[int(np.argmax(scores))] / rate_hz)
 
 
 def _norm(env: np.ndarray) -> list[float]:
@@ -96,6 +114,7 @@ def analyze(wav_path: Path | str) -> dict:
     result = {
         "version": VERSION,
         "bpm": round(bpm, 1),
+        "beat_offset_s": round(_beat_offset(onset, FRAME_HZ, bpm), 3),
         "duration_s": round(len(x) / sr, 2),
         "env_hz": ENV_HZ,
         "energy": _norm(np.sqrt((frames20**2).mean(axis=1))),

@@ -25,31 +25,46 @@ Needs `ffmpeg` on PATH.
 
 ```bash
 ./run.sh                        # robot camera + robot speaker
-./run.sh --volume 70            # set speaker volume (0-100) then run
-./run.sh --volume 40 --volume-only   # just set volume and exit
+./run.sh --gain 0.7             # initial software volume (0-1.5)
+./run.sh --volume 70            # set HARDWARE speaker volume (0-100) at startup
 ./run.sh --source webcam        # laptop webcam, log-only playback (dev mode)
-./run.sh --play Thumb_Up        # skip gestures, just play that song on the robot
-./run.sh --no-dance             # audio-reactive wobble only, no choreography
+./run.sh --play Victory         # skip gestures, just play that song on the robot
+./run.sh --no-dance             # music without choreography
 ```
 
 Hold a sign steady ~1 s within ~2 m of the camera, decent light.
 
-## Dancing
+**Volume during playback**: ☝️ `Pointing_Up` = louder, point DOWN
+(index finger down, other fingers curled — landmark-derived, not a stock
+MediaPipe class) = quieter. Hold the sign to keep stepping (repeats ~every
+0.8 s). This adjusts a software gain on the audio stream, so it's instant
+and never interrupts the song. (The hardware `--volume` endpoint can't be
+used mid-song: the daemon plays a test chirp that kills the current sound.)
 
-Each song is analysed once (numpy, no ML): BPM from onset autocorrelation +
-an RMS energy envelope at 10 Hz, cached as a `.dance.json` sidecar next to
-the converted WAV. While the song plays, a 20 Hz thread drives beat-synced
-moves:
+## Streaming, not file playback
 
-- **fast style** (≥115 BPM, e.g. Tamacun): body sway on half notes, head bob
-  dipping on every beat, antenna flicks
-- **slow style** (<85 BPM, e.g. Hisaishi): gentle head roll + slow whole-bar
-  sway
-- in between: a blend of the two
+Music is streamed over the WebRTC audio channel (`push_audio_sample`, the
+same path the conversation app speaks through) at 16 kHz, ~0.4 s ahead of
+real time. That's what makes live gain possible, starts playback instantly
+(no multi-MB upload first), and gives the dance a sample-exact clock.
 
-Motion amplitude follows the energy envelope in real time — quiet intro =
-small moves, chorus = big. The WAV is pre-uploaded to the daemon before the
-play request so the dance clock starts on the actual playback start.
+## Dancing — body follows the bass, head follows the melody
+
+Each song is analysed once (pure numpy): BPM by onset autocorrelation, plus
+three 20 Hz envelopes of the waveform — broadband energy, **low band
+40–250 Hz** (rhythm section) and **high band 1–4 kHz** (melody, voice,
+bandoneon) — cached as a `.dance.json` sidecar. A 20 Hz thread replays them
+against the stream clock:
+
+- **BODY ← low band**: tango-like circle — body yaw sweeping over the bar,
+  head base tracing a small x/y circle, z pulse on each beat. Moves only
+  when the rhythm section actually plays.
+- **HEAD ← high band**: pitch nods on the beat + roll wiggle at double time,
+  scaled by the melody envelope and accented on its transients — accordion
+  runs visibly ride on top of the body motion, decorrelated from it.
+- Tempo sets the base pace: ≥115 BPM sways on half notes, <85 BPM on whole
+  bars (Libertango gets both layers doing different things — that's the
+  point).
 
 ## Bindings (`songs.json`)
 
@@ -61,6 +76,8 @@ play request so the dance clock starts on the actual playback start.
 | 🤟 | `ILoveYou` | Asaf Avidan — Love it or Leave it |
 | ✋ | `Open_Palm` | Joe Hisaishi — Path of the Wind |
 | ✊ | `Closed_Fist` | **stop** |
+| ☝️ | `Pointing_Up` | **volume up** (hold to repeat) |
+| 👇 | `Pointing_Down` | **volume down** (hold to repeat) |
 
 Edit `songs.json` to rebind (values = audio path or `"STOP"`). Available
 gesture names: `Thumb_Up, Thumb_Down, Victory, ILoveYou, Open_Palm,

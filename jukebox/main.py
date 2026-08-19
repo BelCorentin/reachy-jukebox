@@ -1,9 +1,10 @@
-"""Reachy jukebox: hand signs pick songs, played on the robot speaker.
+"""Reachy jukebox: hand signs pick songs, streamed to the robot speaker.
 
-Loop: camera frame -> MediaPipe gesture -> debounce -> play/stop on the
-daemon speaker (session-independent play_sound). While a song plays, a
-Dancer thread drives beat-synced moves whose style follows the track's BPM
-and whose amplitude follows the live energy envelope (see jukebox/dance.py).
+Loop: camera frame -> MediaPipe gesture -> debounce -> play/stop/volume.
+Music is streamed over the WebRTC audio channel (jukebox/stream.py) so the
+volume signs (Pointing_Up / Pointing_Down) change a software gain instantly,
+mid-song. While a song plays, a Dancer thread follows the track's band
+envelopes: body moves with the bass, head with the melody (jukebox/dance.py).
 """
 
 from __future__ import annotations
@@ -16,65 +17,64 @@ from jukebox.analysis import analyze
 from jukebox.capture import make_source
 from jukebox.dance import Dancer
 from jukebox.gestures import GestureDebouncer, Recognizer
-from jukebox.songs import STOP, load_mapping, wav_for
+from jukebox.songs import STOP, VOLUME_DOWN, VOLUME_UP, load_mapping, wav_for
+from jukebox.stream import StreamPlayer, load_samples
 from jukebox import volume as vol
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("jukebox")
 
+GAIN_STEP = 0.15
+REPEATABLE = frozenset({"Pointing_Up", "Pointing_Down"})
+
 
 class Player:
-    """Play/stop songs + manage the dancer (None robot = log only, dev mode)."""
+    """Play/stop/volume + manage the dancer (None robot = log only, dev mode)."""
 
-    def __init__(self, robot=None, dance: bool = True, wobble: bool = True):
+    def __init__(self, robot=None, dance: bool = True, gain: float = 1.0,
+                 latency_s: float | None = None):
         self.robot = robot
         self.dance = dance
+        self.gain = gain
+        self.latency_s = latency_s
         self.now_playing: str | None = None
+        self.stream: StreamPlayer | None = None
         self.dancer: Dancer | None = None
-        # Dance replaces wobbling (both would fight over the head).
-        if robot is not None and wobble and not dance:
-            try:
-                robot.enable_wobbling()
-            except Exception as e:
-                logger.warning("wobbling unavailable: %s", e)
 
     def play(self, source_path: str) -> None:
         wav = wav_for(source_path)
         analysis = analyze(wav)
-        logger.info("PLAY %s (%.0f BPM)", source_path, analysis["bpm"])
+        logger.info("PLAY %s (%.0f BPM, gain %.2f)", source_path, analysis["bpm"], self.gain)
         if self.robot is None:
             return
-        self._stop_dancer()
-        self.robot.media.stop_playing()
-
-        # Pre-upload so the playback clock starts at the actual play request,
-        # not upload start — keeps the dance on the beat.
-        remote = str(wav)
-        audio = getattr(self.robot.media, "audio", None)
-        if audio is not None and hasattr(audio, "upload_sound"):
-            try:
-                remote = audio.upload_sound(str(wav))
-            except Exception as e:
-                logger.warning("pre-upload failed, playing directly: %s", e)
-        self.robot.media.play_sound(remote)
-        start = time.monotonic()
+        self._teardown()
+        kwargs = {} if self.latency_s is None else {"latency_s": self.latency_s}
+        self.stream = StreamPlayer(self.robot, load_samples(wav), gain=self.gain, **kwargs)
+        self.stream.start()
         self.now_playing = source_path
-
         if self.dance:
-            self.dancer = Dancer(self.robot, analysis, start)
+            self.dancer = Dancer(self.robot, analysis, clock=self.stream.song_time)
             self.dancer.start()
 
     def stop(self) -> None:
         logger.info("STOP")
-        self._stop_dancer()
-        if self.robot is not None:
-            self.robot.media.stop_playing()
+        self._teardown()
         self.now_playing = None
 
-    def _stop_dancer(self) -> None:
+    def volume_step(self, delta: float) -> float:
+        self.gain = min(max(self.gain + delta, 0.0), 1.5)
+        if self.stream is not None:
+            self.stream.set_gain(self.gain)
+        logger.info("gain -> %.2f", self.gain)
+        return self.gain
+
+    def _teardown(self) -> None:
         if self.dancer is not None:
             self.dancer.stop()
             self.dancer = None
+        if self.stream is not None:
+            self.stream.stop()
+            self.stream = None
 
 
 def act(player: Player, mapping: dict[str, str], gesture: str) -> None:
@@ -83,6 +83,10 @@ def act(player: Player, mapping: dict[str, str], gesture: str) -> None:
         return
     if target == STOP:
         player.stop()
+    elif target == VOLUME_UP:
+        player.volume_step(+GAIN_STEP)
+    elif target == VOLUME_DOWN:
+        player.volume_step(-GAIN_STEP)
     else:
         player.play(target)
 
@@ -93,24 +97,27 @@ def main() -> None:
     ap.add_argument("--interval", type=float, default=0.25, help="seconds between frames")
     ap.add_argument("--cooldown", type=float, default=3.0, help="min seconds between actions")
     ap.add_argument("--need-frames", type=int, default=3, help="consecutive frames to confirm a sign")
-    ap.add_argument("--volume", type=int, metavar="0-100", help="set speaker volume at startup")
-    ap.add_argument("--volume-only", action="store_true", help="set volume and exit (with --volume)")
-    ap.add_argument("--no-dance", action="store_true", help="disable dancing (falls back to wobble)")
+    ap.add_argument("--gain", type=float, default=1.0, help="initial software gain (0-1.5)")
+    ap.add_argument("--volume", type=int, metavar="0-100", help="set SPEAKER (hardware) volume at startup")
+    ap.add_argument("--volume-only", action="store_true", help="set hardware volume and exit (with --volume)")
+    ap.add_argument("--latency", type=float, default=None, help="audio output latency for dance sync (s)")
+    ap.add_argument("--no-dance", action="store_true", help="disable dancing")
     ap.add_argument("--play", metavar="GESTURE", help="play one gesture's song and exit (no camera)")
     args = ap.parse_args()
 
     if args.volume is not None:
         applied = vol.set_volume(args.volume)
-        logger.info("speaker volume -> %d", applied)
+        logger.info("hardware speaker volume -> %d", applied)
         if args.volume_only:
             return
 
     mapping = load_mapping()
-    logger.info("mapping: %s", {g: t.rsplit('/', 1)[-1] if t != STOP else t for g, t in mapping.items()})
+    logger.info("mapping: %s", {g: t.rsplit('/', 1)[-1] for g, t in mapping.items()})
 
     if args.play:
         src = make_source("robot") if args.source == "robot" else None
-        player = Player(src.robot if src else None, dance=not args.no_dance)
+        player = Player(src.robot if src else None, dance=not args.no_dance,
+                        gain=args.gain, latency_s=args.latency)
         act(player, mapping, args.play)
         if src:
             input("Playing — press Enter to stop and exit.\n")
@@ -120,9 +127,11 @@ def main() -> None:
 
     source = make_source(args.source)
     robot = getattr(source, "robot", None)
-    player = Player(robot, dance=not args.no_dance)
+    player = Player(robot, dance=not args.no_dance, gain=args.gain, latency_s=args.latency)
     recognizer = Recognizer()
-    debouncer = GestureDebouncer(need_frames=args.need_frames, cooldown_s=args.cooldown)
+    debouncer = GestureDebouncer(
+        need_frames=args.need_frames, cooldown_s=args.cooldown, repeatable=REPEATABLE
+    )
 
     logger.info("watching for hand signs (%s)…  Ctrl-C to quit", args.source)
     try:

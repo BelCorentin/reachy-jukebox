@@ -17,6 +17,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 CACHE_DIR = REPO / "cache"
 STOP = "STOP"
+VOLUME_UP = "VOLUME_UP"
+VOLUME_DOWN = "VOLUME_DOWN"
+SPECIAL = (STOP, VOLUME_UP, VOLUME_DOWN)
+
+# Music is streamed over the WebRTC audio channel (16 kHz — see stream.py),
+# so the cache WAVs are rendered at that rate directly.
+STREAM_RATE = 16000
 
 KNOWN_GESTURES = (
     "Thumb_Up",
@@ -26,6 +33,7 @@ KNOWN_GESTURES = (
     "Open_Palm",
     "Closed_Fist",
     "Pointing_Up",
+    "Pointing_Down",  # not a stock MediaPipe class; detected from landmarks
 )
 
 
@@ -37,7 +45,7 @@ def load_mapping(path: Path | None = None) -> dict[str, str]:
     for gesture, target in raw.items():
         if gesture not in KNOWN_GESTURES:
             raise ValueError(f"unknown gesture {gesture!r} (known: {', '.join(KNOWN_GESTURES)})")
-        mapping[gesture] = target if target == STOP else str(Path(target).expanduser())
+        mapping[gesture] = target if target in SPECIAL else str(Path(target).expanduser())
     return mapping
 
 
@@ -46,7 +54,7 @@ def wav_for(source: str) -> Path:
     src = Path(source).expanduser()
     if not src.is_file():
         raise FileNotFoundError(f"song not found: {src}")
-    key = hashlib.sha256(f"{src}|{src.stat().st_mtime_ns}".encode()).hexdigest()[:24]
+    key = hashlib.sha256(f"{src}|{src.stat().st_mtime_ns}|{STREAM_RATE}".encode()).hexdigest()[:24]
     out = CACHE_DIR / f"{key}.wav"
     if out.exists():
         return out
@@ -54,7 +62,7 @@ def wav_for(source: str) -> Path:
     tmp = out.with_suffix(".tmp.wav")
     subprocess.run(
         ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src),
-         "-ac", "1", "-ar", "44100", "-sample_fmt", "s16", str(tmp)],
+         "-ac", "1", "-ar", str(STREAM_RATE), "-sample_fmt", "s16", str(tmp)],
         check=True, timeout=300,
     )
     tmp.rename(out)

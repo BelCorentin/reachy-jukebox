@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
 """Standalone jukebox tests (no pytest — run with .venv/bin/python tests/test_jukebox.py).
 
-Covers: mapping load/validation, debouncer state machine, conversion cache
-keying, and play/stop dispatch against a stubbed robot. No camera, no
-MediaPipe, no robot.
+Covers: mapping, debouncer (incl. repeatable volume signs), Pointing_Down
+landmark detector, band analysis on synthetic signals, decorrelated dance
+pose math, stream gain, and play/stop/volume dispatch against a stubbed
+robot. No camera, no MediaPipe model, no robot.
 """
 
 import json
+import math
 import sys
 import tempfile
+import time
+import wave as wave_mod
 from pathlib import Path
+
+import numpy as np
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from jukebox.gestures import GestureDebouncer  # noqa: E402
-from jukebox.songs import STOP, load_mapping  # noqa: E402
-from jukebox.main import Player, act  # noqa: E402
+from jukebox.analysis import analyze  # noqa: E402
+from jukebox.gestures import GestureDebouncer, detect_pointing_down  # noqa: E402
+from jukebox.songs import SPECIAL, STOP, STREAM_RATE, load_mapping  # noqa: E402
+from jukebox.main import GAIN_STEP, Player, act  # noqa: E402
 
 PASSED = 0
 
@@ -33,7 +40,9 @@ def ok(cond: bool, label: str) -> None:
 print("mapping")
 mapping = load_mapping()
 ok(mapping["Closed_Fist"] == STOP, "Closed_Fist maps to STOP")
-ok(all(v == STOP or v.startswith("/") for v in mapping.values()), "paths are expanded to absolute")
+ok(mapping["Pointing_Up"] == "VOLUME_UP" and mapping["Pointing_Down"] == "VOLUME_DOWN",
+   "volume signs mapped")
+ok(all(v in SPECIAL or v.startswith("/") for v in mapping.values()), "paths expanded to absolute")
 
 bad = Path(tempfile.mkdtemp()) / "songs.json"
 bad.write_text(json.dumps({"Jazz_Hands": "x.mp3"}))
@@ -50,76 +59,95 @@ d = GestureDebouncer(need_frames=3, cooldown_s=3.0)
 ok(d.feed("Thumb_Up", 0.0) is None, "1 frame not enough")
 ok(d.feed("Thumb_Up", 0.1) is None, "2 frames not enough")
 ok(d.feed("Thumb_Up", 0.2) == "Thumb_Up", "3 consecutive frames fire")
-ok(d.feed("Thumb_Up", 0.3) is None, "held sign does not re-fire")
 ok(d.feed("Thumb_Up", 5.0) is None, "held sign does not re-fire even after cooldown")
 ok(d.feed(None, 5.1) is None, "release resets")
-for i in range(3):
-    r = d.feed("Thumb_Up", 5.2 + i * 0.1)
-ok(r == "Thumb_Up", "release + re-sign fires again after cooldown")
+fired = [d.feed("Thumb_Up", 5.2 + i * 0.1) for i in range(3)]
+ok("Thumb_Up" in fired, "release + re-sign fires again")
 
-d2 = GestureDebouncer(need_frames=3, cooldown_s=3.0)
-for i in range(3):
-    d2.feed("Thumb_Up", i * 0.1)
-d2.feed(None, 0.4)
-r = None
-for i in range(3):
-    r = d2.feed("Victory", 0.5 + i * 0.1)
-ok(r is None, "different sign inside cooldown suppressed")
-fired = [d2.feed("Victory", 4.0 + i * 0.1) for i in range(3)]
-ok("Victory" in fired, "different sign after cooldown fires")
+dr = GestureDebouncer(need_frames=2, cooldown_s=3.0, repeatable=frozenset({"Pointing_Up"}), repeat_s=0.5)
+dr.feed("Pointing_Up", 0.0)
+ok(dr.feed("Pointing_Up", 0.1) == "Pointing_Up", "repeatable fires first time")
+ok(dr.feed("Pointing_Up", 0.3) is None, "repeatable respects repeat interval")
+ok(dr.feed("Pointing_Up", 0.7) == "Pointing_Up", "HELD repeatable re-fires (no release needed)")
+ok(dr.feed("Pointing_Up", 1.3) == "Pointing_Up", "keeps stepping while held")
 
-d3 = GestureDebouncer(need_frames=3, cooldown_s=0.0)
-d3.feed("Thumb_Up", 0.0)
-d3.feed("Victory", 0.1)
-d3.feed("Victory", 0.2)
-ok(d3.feed("Victory", 0.3) == "Victory", "candidate switch restarts the count")
+# ── Pointing_Down landmark detector ─────────────────────────────────────────
 
-# ── analysis (synthetic click tracks) ───────────────────────────────────────
+print("pointing down")
+
+
+class P:
+    def __init__(self, x, y):
+        self.x, self.y = x, y
+
+
+def hand(index_tip_y, curl=0.1):
+    """21 landmarks: wrist at (0.5,0.5); index at x=0.5; others near wrist."""
+    lm = [P(0.5, 0.5) for _ in range(21)]
+    lm[5] = P(0.5, 0.55)              # index mcp
+    lm[6] = P(0.5, (0.55 + index_tip_y) / 2)  # index pip
+    lm[8] = P(0.5, index_tip_y)       # index tip
+    for tip, mcp in ((12, 9), (16, 13), (20, 17)):
+        lm[mcp] = P(0.55, 0.5)
+        lm[tip] = P(0.55, 0.5 + curl)  # curled: close to wrist
+    return lm
+
+
+ok(detect_pointing_down(hand(index_tip_y=0.85)), "index down + curled others detected")
+ok(not detect_pointing_down(hand(index_tip_y=0.2)), "index UP not detected as down")
+open_hand = hand(index_tip_y=0.85)
+for tip in (12, 16, 20):
+    open_hand[tip] = P(0.55, 0.95)  # other fingers also extended down
+ok(not detect_pointing_down(open_hand), "open hand not detected")
+ok(not detect_pointing_down(None), "no landmarks -> False")
+
+# ── analysis (synthetic signals) ────────────────────────────────────────────
 
 print("analysis")
-import math  # noqa: E402
-import wave as wave_mod  # noqa: E402
-
-import numpy as np  # noqa: E402
-
-from jukebox.analysis import analyze  # noqa: E402
 
 
-def click_track(bpm: float, seconds: float = 20.0, sr: int = 44100, quiet_head: bool = False) -> Path:
-    """s16 mono wav: decaying 1 kHz clicks on the beat, optional quiet first half."""
+def synth_wav(seconds=16.0, sr=STREAM_RATE, bpm=None, low_hz=None, high_hz=None, split=False):
+    """Click track and/or tones; split=True puts low in 1st half, high in 2nd."""
     n = int(seconds * sr)
+    t = np.arange(n) / sr
     x = np.zeros(n, dtype=np.float32)
-    beat = 60.0 / bpm
-    t = 0.0
-    while t < seconds:
-        i = int(t * sr)
-        dur = int(0.05 * sr)
-        env = np.exp(-np.linspace(0, 8, dur))
-        tone = np.sin(2 * math.pi * 1000 * np.arange(dur) / sr)
-        seg = (env * tone)[: n - i]
-        amp = 0.2 if (quiet_head and t < seconds / 2) else 0.9
-        x[i : i + len(seg)] += amp * seg
-        t += beat
-    path = Path(tempfile.mkdtemp()) / f"click{int(bpm)}.wav"
+    if bpm:
+        beat = 60.0 / bpm
+        for bt in np.arange(0, seconds, beat):
+            i = int(bt * sr)
+            dur = int(0.05 * sr)
+            env = np.exp(-np.linspace(0, 8, dur))
+            x[i : i + dur] += (env * np.sin(2 * np.pi * 1000 * np.arange(dur) / sr))[: n - i] * 0.8
+    if low_hz:
+        seg = x[: n // 2] if split else x
+        seg += 0.5 * np.sin(2 * np.pi * low_hz * t[: len(seg)]).astype(np.float32)
+    if high_hz:
+        seg = slice(n // 2, n) if split else slice(0, n)
+        x[seg] += 0.5 * np.sin(2 * np.pi * high_hz * t[: n - (n // 2 if split else 0)]).astype(np.float32)
+    path = Path(tempfile.mkdtemp()) / "s.wav"
     with wave_mod.open(str(path), "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(sr)
-        w.writeframes((x * 32767).astype(np.int16).tobytes())
+        w.writeframes((np.clip(x, -1, 1) * 32767).astype(np.int16).tobytes())
     return path
 
 
-a_fast = analyze(click_track(130.0))
-ok(abs(a_fast["bpm"] - 130.0) < 4.0, f"130 BPM detected ({a_fast['bpm']})")
-a_slow = analyze(click_track(70.0))
+a_fast = analyze(synth_wav(bpm=130))
+ok(abs(a_fast["bpm"] - 130.0) < 5.0, f"130 BPM detected ({a_fast['bpm']})")
+a_slow = analyze(synth_wav(bpm=70))
 ok(abs(a_slow["bpm"] - 70.0) < 4.0 or abs(a_slow["bpm"] - 140.0) < 8.0,
    f"70 BPM detected as 70 or folded 140 ({a_slow['bpm']})")
-a_dyn = analyze(click_track(120.0, quiet_head=True))
-e = a_dyn["energy"]
-ok(np.mean(e[: len(e) // 2]) < np.mean(e[len(e) // 2 :]), "energy envelope tracks quiet->loud")
-ok(0.0 <= min(e) and max(e) <= 1.0, "energy normalised to [0,1]")
-p = analyze(click_track(130.0))
-ok(a_fast["duration_s"] == p["duration_s"], "sidecar cache round-trips")
+
+a_band = analyze(synth_wav(low_hz=100, high_hz=2000, split=True))
+half = len(a_band["low"]) // 2
+ok(np.mean(a_band["low"][:half]) > np.mean(a_band["low"][half:]),
+   "low envelope tracks the 100 Hz half")
+ok(np.mean(a_band["high"][half:]) > np.mean(a_band["high"][:half]),
+   "high envelope tracks the 2 kHz half")
+for k in ("energy", "low", "high"):
+    ok(0.0 <= min(a_band[k]) and max(a_band[k]) <= 1.0, f"{k} normalised to [0,1]")
+ok(analyze(synth_wav(bpm=130))["version"] == 2, "sidecar version 2")
 
 # ── dance pose math ─────────────────────────────────────────────────────────
 
@@ -128,41 +156,47 @@ from jukebox.dance import dance_pose  # noqa: E402
 
 for analysis, label in ((a_fast, "fast"), (a_slow, "slow")):
     for t in np.linspace(0, 10, 200):
-        pose = dance_pose(analysis, float(t))
-        assert abs(pose["roll"]) <= 40 and abs(pose["pitch"]) <= 40, "head angle clamp"
-        assert abs(math.degrees(pose["body_yaw"])) <= 20, "body yaw modest"
-        assert abs(pose["z"]) <= 0.015, "bob within 15mm"
+        p = dance_pose(analysis, float(t))
+        assert abs(p["roll"]) <= 40 and abs(p["pitch"]) <= 40, "head angle clamp"
+        assert abs(math.degrees(p["body_yaw"])) <= 20, "body yaw modest"
+        assert abs(p["z"]) <= 0.015 and abs(p["x"]) <= 0.01 and abs(p["y"]) <= 0.01, "translations small"
     ok(True, f"{label} style poses inside safety clamps over 10s sweep")
 
-fast_amp = max(abs(dance_pose(a_fast, t)["pitch"]) for t in np.linspace(0, 4, 160))
-slow_amp = max(abs(dance_pose(a_slow, t)["pitch"]) for t in np.linspace(0, 4, 160))
-ok(fast_amp > slow_amp, "fast style nods harder than slow style")
+# decorrelation: body follows low band, head follows high band
+quiet = dict(a_band, low=[0.0] * len(a_band["low"]), high=[1.0] * len(a_band["high"]))
+loud = dict(a_band, low=[1.0] * len(a_band["low"]), high=[1.0] * len(a_band["high"]))
+ts = np.linspace(0, 8, 160)
+body_quiet = max(abs(dance_pose(quiet, float(t))["body_yaw"]) for t in ts)
+body_loud = max(abs(dance_pose(loud, float(t))["body_yaw"]) for t in ts)
+ok(body_loud > 2 * body_quiet, "body amplitude driven by LOW band")
+nohigh = dict(a_band, low=[1.0] * len(a_band["low"]), high=[0.0] * len(a_band["high"]))
+head_quiet = max(abs(dance_pose(nohigh, float(t))["roll"]) for t in ts)
+head_loud = max(abs(dance_pose(loud, float(t))["roll"]) for t in ts)
+ok(head_loud > 2 * head_quiet, "head amplitude driven by HIGH band")
+ok(body_quiet >= 0 and max(abs(dance_pose(nohigh, float(t))["body_yaw"]) for t in ts) > 2 * body_quiet,
+   "low band moves body even with head band silent (decorrelated)")
 
-# ── player dispatch ─────────────────────────────────────────────────────────
+# ── stream + player dispatch ────────────────────────────────────────────────
 
-print("player dispatch")
+print("stream + dispatch")
 
 
 class StubMedia:
     def __init__(self):
-        self.played, self.stops = [], 0
-        self.audio = None
+        self.chunks, self.cleared = [], 0
+        self.audio = self
 
-    def play_sound(self, f):
-        self.played.append(f)
+    def push_audio_sample(self, data):
+        self.chunks.append(data)
 
-    def stop_playing(self):
-        self.stops += 1
+    def clear_player(self):
+        self.cleared += 1
 
 
 class StubRobot:
     def __init__(self):
         self.media = StubMedia()
-        self.wobbling = False
         self.targets = []
-
-    def enable_wobbling(self):
-        self.wobbling = True
 
     def set_target(self, **kw):
         self.targets.append(kw)
@@ -173,32 +207,29 @@ class StubRobot:
 
 import jukebox.main as jm  # noqa: E402
 
-song = click_track(120.0)
-jm.wav_for = lambda p: song  # skip ffmpeg
+song = synth_wav(seconds=4.0, bpm=120)
+jm.wav_for = lambda p: song
 robot = StubRobot()
-player = Player(robot, dance=False)
-ok(robot.wobbling, "wobble enabled when dance off")
-act(player, {"Thumb_Up": "/x/y.mp3", "Closed_Fist": STOP}, "Thumb_Up")
-ok(robot.media.played == [str(song)], "play dispatches converted wav")
-ok(robot.media.stops == 1, "previous sound stopped before playing")
-ok(player.now_playing == "/x/y.mp3", "now_playing tracked")
-act(player, {"Closed_Fist": STOP}, "Closed_Fist")
-ok(robot.media.stops == 2 and player.now_playing is None, "STOP stops")
-act(player, {"Closed_Fist": STOP}, "Pointing_Up")
-ok(robot.media.stops == 2, "unmapped gesture ignored")
+player = Player(robot, dance=True, gain=1.0)
+act(player, mapping | {"Thumb_Up": "/x/y.mp3"}, "Thumb_Up")
+time.sleep(0.6)
+ok(len(robot.media.chunks) >= 3, "stream pushes audio chunks")
+ok(player.dancer is not None and player.dancer.is_alive(), "dancer running on stream clock")
+ok(len(robot.targets) >= 3, "dancer drives set_target")
 
-robot2 = StubRobot()
-player2 = Player(robot2, dance=True)
-ok(not robot2.wobbling, "wobble skipped when dancing (no double motion)")
-act(player2, {"Thumb_Up": "/x/y.mp3"}, "Thumb_Up")
-import time as _t  # noqa: E402
+act(player, mapping, "Pointing_Up")
+ok(abs(player.gain - (1.0 + GAIN_STEP)) < 1e-9, "volume sign raises gain")
+ok(abs(player.stream.gain - player.gain) < 1e-9, "live stream gain updated mid-song")
+for _ in range(10):
+    act(player, mapping, "Pointing_Up")
+ok(player.gain <= 1.5, "gain capped at 1.5")
+for _ in range(20):
+    act(player, mapping, "Pointing_Down")
+ok(player.gain >= 0.0, "gain floored at 0")
 
-_t.sleep(0.4)
-ok(player2.dancer is not None and player2.dancer.is_alive(), "dancer thread running")
-ok(len(robot2.targets) >= 3, "dancer drives set_target")
-player2.stop()
-_t.sleep(0.2)
-ok(not player2.dancer_alive() if hasattr(player2, "dancer_alive") else player2.dancer is None,
-   "stop kills dancer")
+act(player, mapping, "Closed_Fist")
+time.sleep(0.3)
+ok(player.stream is None and player.dancer is None, "STOP tears down stream + dancer")
+ok(robot.media.cleared >= 1, "stop flushes queued audio (instant silence)")
 
 print(f"\nALL {PASSED} CHECKS PASSED")

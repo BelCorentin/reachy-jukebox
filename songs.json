@@ -4,5 +4,7 @@
   "Victory": "~/Music/Songs/Astor Piazzolla-Libertango.mp3",
   "ILoveYou": "~/Music/Songs/Asaf Avidan _ Love it or Leave it.mp3",
   "Open_Palm": "~/Music/Songs/_Path of The Wind_ by Joe Hisaishi.mp3",
-  "Closed_Fist": "STOP"
+  "Closed_Fist": "STOP",
+  "Pointing_Up": "VOLUME_UP",
+  "Pointing_Down": "VOLUME_DOWN"
 }

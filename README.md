@@ -24,12 +24,32 @@ Needs `ffmpeg` on PATH.
 ## Use
 
 ```bash
-./run.sh                    # robot camera + robot speaker
-./run.sh --source webcam    # laptop webcam, log-only playback (dev mode)
-./run.sh --play Thumb_Up    # skip gestures, just play that song on the robot
+./run.sh                        # robot camera + robot speaker
+./run.sh --volume 70            # set speaker volume (0-100) then run
+./run.sh --volume 40 --volume-only   # just set volume and exit
+./run.sh --source webcam        # laptop webcam, log-only playback (dev mode)
+./run.sh --play Thumb_Up        # skip gestures, just play that song on the robot
+./run.sh --no-dance             # audio-reactive wobble only, no choreography
 ```
 
 Hold a sign steady ~1 s within ~2 m of the camera, decent light.
+
+## Dancing
+
+Each song is analysed once (numpy, no ML): BPM from onset autocorrelation +
+an RMS energy envelope at 10 Hz, cached as a `.dance.json` sidecar next to
+the converted WAV. While the song plays, a 20 Hz thread drives beat-synced
+moves:
+
+- **fast style** (≥115 BPM, e.g. Tamacun): body sway on half notes, head bob
+  dipping on every beat, antenna flicks
+- **slow style** (<85 BPM, e.g. Hisaishi): gentle head roll + slow whole-bar
+  sway
+- in between: a blend of the two
+
+Motion amplitude follows the energy envelope in real time — quiet intro =
+small moves, chorus = big. The WAV is pre-uploaded to the daemon before the
+play request so the dance clock starts on the actual playback start.
 
 ## Bindings (`songs.json`)
 

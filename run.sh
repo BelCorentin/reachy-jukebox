@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Reachy jukebox launcher.
-# Usage: ./run.sh [--setup] [args for jukebox.main, e.g. --source webcam]
+# Usage: ./run.sh --setup                 install + pick your songs (once)
+#        ./run.sh --setup-songs | --songs | --bind SIGN FILE
+#        ./run.sh [--source webcam] [...]  run the jukebox
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,8 +17,17 @@ if [[ "${1:-}" == "--setup" ]]; then
       "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/latest/gesture_recognizer.task"
   fi
   echo "setup done"
+  if [[ ! -f "$ROOT/songs.json" && -t 0 ]]; then
+    echo; echo "Now pick the songs Reachy plays for each hand sign:"
+    cd "$ROOT" && exec "$PY" -m jukebox.main --setup-songs
+  fi
   exit 0
 fi
+
+# Song setup commands need neither the robot nor the camera.
+case "${1:-}" in
+  --songs|--bind|--setup-songs|--help|-h) cd "$ROOT" && exec "$PY" -m jukebox.main "$@" ;;
+esac
 
 # Resolve the robot (mDNS goes cold after restarts; fall back to last-known IP).
 ROBOT_HOST="${REACHY_HOST:-}"

@@ -1,25 +1,51 @@
 # reachy-jukebox
 
-Show Reachy Mini a hand sign, it plays a song on its speaker — and grooves
-(head wobbling follows the audio). Thumbs up = upbeat, thumbs down = Beethoven.
+Show Reachy Mini a hand sign and it plays one of **your** songs on its speaker,
+and dances to it: the body follows the bass, the head follows the melody.
+✊ stops the music, ☝️ / 👇 turn it up or down.
 
 ## How it works
 
-Camera frame → MediaPipe stock `GestureRecognizer` (pretrained, no training)
-→ debounce (N consecutive frames + cooldown + release-before-refire) →
-`media.play_sound()` on the robot speaker via the daemon REST API
-(session-independent — no conversation app involved). `Closed_Fist` stops.
+Camera frame → MediaPipe's stock `GestureRecognizer` (pretrained, no training)
+→ debounce (a few consecutive frames + cooldown + release before re-firing) →
+the song is streamed to the robot speaker while a dance thread follows it.
 
-Songs are any format ffmpeg reads; they're converted once to mono 44.1 kHz
-s16 WAV and cached in `cache/` (keyed by path+mtime).
+Songs can be any format ffmpeg reads. They stay where they are on your disk
+and are converted once into `cache/`.
 
 ## Setup (once)
 
+Needs [`uv`](https://docs.astral.sh/uv/) and `ffmpeg`.
+
 ```bash
-./run.sh --setup   # venv + reachy-mini (prerelease) + mediapipe + gesture model (~8 MB)
+./run.sh --setup
 ```
 
-Needs `ffmpeg` on PATH.
+This installs the dependencies, downloads the gesture model (~8 MB), then asks
+you which song each sign should play. For each sign, type part of a song name,
+pick it from the list, or press Enter to skip:
+
+```
+Music folder [~/Music]:
+Found 412 songs in /home/you/Music.
+
+👍 Thumb_Up (now: nothing) — part of a song name, Enter = keep, '-' = remove: tango
+   1. Libertango.mp3
+   2. Tango de Roxanne.flac
+  number (Enter = search again): 1
+  ✓ 👍 → Libertango.mp3
+```
+
+Change your songs any time:
+
+```bash
+./run.sh --setup-songs [FOLDER]          # the same walk-through again
+./run.sh --bind Victory ~/Music/song.mp3 # one sign
+./run.sh --songs                         # what each sign plays
+```
+
+Your choices are saved in `songs.json`, which stays out of git. See
+`songs.example.json` for the format.
 
 ## Use
 
@@ -66,34 +92,33 @@ against the stream clock:
   bars (Libertango gets both layers doing different things — that's the
   point).
 
-## Bindings (`songs.json`)
+## The signs
 
-| Sign | Gesture name | Song |
+| Sign | Gesture name | Does |
 |---|---|---|
-| 👍 | `Thumb_Up` | Rodrigo y Gabriela — Tamacun |
-| 👎 | `Thumb_Down` | Beethoven — Symphony No. 7, Allegretto |
-| ✌️ | `Victory` | Astor Piazzolla — Libertango |
-| 🤟 | `ILoveYou` | Asaf Avidan — Love it or Leave it |
-| ✋ | `Open_Palm` | Joe Hisaishi — Path of the Wind |
+| 👍 | `Thumb_Up` | your song |
+| 👎 | `Thumb_Down` | your song |
+| ✌️ | `Victory` | your song |
+| 🤟 | `ILoveYou` | your song |
+| ✋ | `Open_Palm` | your song |
 | ✊ | `Closed_Fist` | **stop** |
 | ☝️ | `Pointing_Up` | **volume up** (hold to repeat) |
 | 👇 | `Pointing_Down` | **volume down** (hold to repeat) |
 
-Edit `songs.json` to rebind (values = audio path or `"STOP"`). Available
-gesture names: `Thumb_Up, Thumb_Down, Victory, ILoveYou, Open_Palm,
-Closed_Fist, Pointing_Up`. Audio files stay where they are (`~/Music/...`);
-nothing is copied into the repo.
+My own set, for the record: Tamacun (Rodrigo y Gabriela), Beethoven's 7th
+Allegretto, Piazzolla's Libertango, Asaf Avidan's *Love it or Leave it*, and
+Hisaishi's *Path of the Wind*. Libertango shows the two-layer dance best.
 
 ## Robot notes (shared with reachy-memoire)
 
-`run.sh` handles the known daemon quirks: mDNS-cold fallback to the last
-known IP, `REACHY_SIGNALLING_HOST`, media-acquire preflight, and enabling
-motors (they boot disabled; wobbling needs them). Don't run at the same time
+`run.sh` handles the known daemon quirks: it falls back to the last known IP
+when mDNS is slow, does the media-acquire preflight, and enables the motors
+(they boot disabled, and the dance needs them). Don't run at the same time
 as the conversation app — its mic will hear the music and the model will
 start reviewing your taste.
 
 ## Tests
 
 ```bash
-.venv/bin/python tests/test_jukebox.py   # 19 checks, no robot/camera needed
+.venv/bin/python tests/test_jukebox.py   # 51 checks, no robot/camera needed
 ```

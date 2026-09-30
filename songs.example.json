@@ -1,0 +1,8 @@
+{
+  "_help": "Copy to songs.json, or run ./run.sh --setup-songs. Values are paths to any audio file ffmpeg can read. Stop (Closed_Fist) and volume (Pointing_Up / Pointing_Down) work without being listed.",
+  "Thumb_Up": "~/Music/an upbeat song.mp3",
+  "Thumb_Down": "~/Music/something calm.mp3",
+  "Victory": "~/Music/a tango.mp3",
+  "ILoveYou": "~/Music/your favourite.mp3",
+  "Open_Palm": "~/Music/a waltz.mp3"
+}

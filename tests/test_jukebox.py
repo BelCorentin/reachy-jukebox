@@ -22,7 +22,10 @@ sys.path.insert(0, str(REPO))
 
 from jukebox.analysis import analyze  # noqa: E402
 from jukebox.gestures import GestureDebouncer, detect_pointing_down  # noqa: E402
-from jukebox.songs import SPECIAL, STOP, STREAM_RATE, load_mapping  # noqa: E402
+from jukebox.songs import (  # noqa: E402
+    SPECIAL, STOP, STREAM_RATE, find_audio, load_mapping, missing_songs, save_binding,
+)
+from jukebox import setup_songs  # noqa: E402
 from jukebox.main import GAIN_STEP, Player, act  # noqa: E402
 
 PASSED = 0
@@ -38,19 +41,50 @@ def ok(cond: bool, label: str) -> None:
 # ── mapping ─────────────────────────────────────────────────────────────────
 
 print("mapping")
-mapping = load_mapping()
-ok(mapping["Closed_Fist"] == STOP, "Closed_Fist maps to STOP")
+tmp = Path(tempfile.mkdtemp())
+mapping = load_mapping(tmp / "absent.json")
+ok(mapping["Closed_Fist"] == STOP, "no songs.json: Closed_Fist still maps to STOP")
 ok(mapping["Pointing_Up"] == "VOLUME_UP" and mapping["Pointing_Down"] == "VOLUME_DOWN",
-   "volume signs mapped")
-ok(all(v in SPECIAL or v.startswith("/") for v in mapping.values()), "paths expanded to absolute")
+   "no songs.json: volume signs still mapped")
+ok(not any(v not in SPECIAL for v in mapping.values()), "no songs.json: no songs bound")
 
-bad = Path(tempfile.mkdtemp()) / "songs.json"
+bad = tmp / "bad.json"
 bad.write_text(json.dumps({"Jazz_Hands": "x.mp3"}))
 try:
     load_mapping(bad)
     ok(False, "unknown gesture rejected")
 except ValueError:
     ok(True, "unknown gesture rejected")
+
+example = load_mapping(REPO / "songs.example.json")
+ok(set(missing_songs(example)) == {"Thumb_Up", "Thumb_Down", "Victory", "ILoveYou", "Open_Palm"},
+   "example file loads (comment key skipped) and its placeholder songs are reported missing")
+
+print("binding")
+lib = tmp / "music"
+(lib / "Tango").mkdir(parents=True)
+for name in ("Tango/Libertango.mp3", "Waltz.flac", "notes.txt"):
+    (lib / name).write_bytes(b"x")
+ok([p.name for p in find_audio(lib)] == ["Libertango.mp3", "Waltz.flac"], "find_audio: audio only, recursive")
+
+songs = tmp / "songs.json"
+save_binding("Victory", str(lib / "Tango/Libertango.mp3"), songs)
+m = load_mapping(songs)
+ok(m["Victory"].endswith("Libertango.mp3") and m["Closed_Fist"] == STOP, "bind a song, controls kept")
+ok(not missing_songs(m), "bound file is not missing")
+try:
+    save_binding("Victory", str(lib / "nope.mp3"), songs)
+    ok(False, "binding a missing file is refused")
+except FileNotFoundError:
+    ok(True, "binding a missing file is refused")
+save_binding("Victory", None, songs)
+ok("Victory" not in load_mapping(songs), "binding removed")
+
+answers = iter([str(lib), "waltz", "1", "", "", "", "tango", "1"])
+code = setup_songs.run(ask=lambda _prompt: next(answers), songs_file=songs)
+m = load_mapping(songs)
+ok(code == 0 and m["Thumb_Up"].endswith("Waltz.flac") and m["Open_Palm"].endswith("Libertango.mp3")
+   and "Thumb_Down" not in m, "interactive setup: search, pick by number, Enter skips")
 
 # ── debouncer ───────────────────────────────────────────────────────────────
 
@@ -221,7 +255,7 @@ song = synth_wav(seconds=4.0, bpm=120)
 jm.wav_for = lambda p: song
 robot = StubRobot()
 player = Player(robot, dance=True, gain=1.0)
-act(player, mapping | {"Thumb_Up": "/x/y.mp3"}, "Thumb_Up")
+act(player, mapping | {"Thumb_Up": str(song)}, "Thumb_Up")
 time.sleep(0.6)
 ok(len(robot.media.chunks) >= 3, "stream pushes audio chunks")
 ok(player.dancer is not None and player.dancer.is_alive(), "dancer running on stream clock")

@@ -17,7 +17,22 @@ from jukebox.analysis import analyze
 from jukebox.capture import make_source
 from jukebox.dance import Dancer
 from jukebox.gestures import GestureDebouncer, Recognizer
-from jukebox.songs import STOP, VOLUME_DOWN, VOLUME_UP, load_mapping, wav_for
+from pathlib import Path
+
+from jukebox import setup_songs
+from jukebox.songs import (
+    SETUP_HINT,
+    SIGN_EMOJI,
+    SONG_GESTURES,
+    STOP,
+    VOLUME_DOWN,
+    VOLUME_UP,
+    load_mapping,
+    missing_songs,
+    save_binding,
+    song_bindings,
+    wav_for,
+)
 from jukebox.stream import StreamPlayer, load_samples
 from jukebox import volume as vol
 
@@ -87,8 +102,21 @@ def act(player: Player, mapping: dict[str, str], gesture: str) -> None:
         player.volume_step(+GAIN_STEP)
     elif target == VOLUME_DOWN:
         player.volume_step(-GAIN_STEP)
+    elif not Path(target).is_file():
+        logger.warning("%s is bound to a missing file: %s — rebind it with ./run.sh --bind %s <file>",
+                       gesture, target, gesture)
     else:
         player.play(target)
+
+
+def show_songs(mapping: dict[str, str]) -> None:
+    """Print every sign and what it does."""
+    missing = missing_songs(mapping)
+    for gesture in SONG_GESTURES:
+        target = mapping.get(gesture)
+        state = "—" if target is None else (f"✗ missing: {target}" if gesture in missing else Path(target).name)
+        print(f"  {SIGN_EMOJI[gesture]} {gesture:<11} {state}")
+    print("  ✊ Closed_Fist stop · ☝️ Pointing_Up volume up · 👇 Pointing_Down volume down")
 
 
 def main() -> None:
@@ -103,7 +131,25 @@ def main() -> None:
     ap.add_argument("--latency", type=float, default=None, help="audio output latency for dance sync (s)")
     ap.add_argument("--no-dance", action="store_true", help="disable dancing")
     ap.add_argument("--play", metavar="GESTURE", help="play one gesture's song and exit (no camera)")
+    ap.add_argument("--songs", action="store_true", help="show which song each sign plays, and exit")
+    ap.add_argument("--bind", nargs=2, metavar=("SIGN", "FILE"), help="bind a sign to an audio file, and exit")
+    ap.add_argument("--setup-songs", nargs="?", const="", metavar="FOLDER",
+                    help="interactive: pick a song for each sign from FOLDER (default ~/Music), and exit")
     args = ap.parse_args()
+
+    if args.setup_songs is not None:
+        raise SystemExit(setup_songs.run(args.setup_songs or None))
+    if args.bind:
+        gesture, audio = args.bind
+        try:
+            written = save_binding(gesture, audio)
+        except (ValueError, FileNotFoundError) as e:
+            raise SystemExit(f"✗ {e}")
+        print(f"✓ {SIGN_EMOJI.get(gesture, '')} {gesture} → {Path(audio).name}  (saved in {written.name})")
+        return
+    if args.songs:
+        show_songs(load_mapping())
+        return
 
     if args.volume is not None:
         applied = vol.set_volume(args.volume)
@@ -112,7 +158,12 @@ def main() -> None:
             return
 
     mapping = load_mapping()
-    logger.info("mapping: %s", {g: t.rsplit('/', 1)[-1] for g, t in mapping.items()})
+    playable = {g: t for g, t in song_bindings(mapping).items() if g not in missing_songs(mapping)}
+    if not playable:
+        raise SystemExit("No songs bound yet.\n" + SETUP_HINT)
+    for gesture, target in missing_songs(mapping).items():
+        logger.warning("%s: file not found (%s) — ./run.sh --bind %s <file> to fix", gesture, target, gesture)
+    logger.info("songs: %s", {g: Path(t).name for g, t in playable.items()})
 
     if args.play:
         src = make_source("robot") if args.source == "robot" else None
